@@ -536,10 +536,11 @@ input:focus {
   background: #f4f4f4;
 }
 
-.send-icon {
-  width: 24px;
-  height: 24px;
-  fill: currentColor;
+.send-icon-image {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  display: block;
 }
 
 .privacy-overlay {
