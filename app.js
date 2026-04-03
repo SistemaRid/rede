@@ -65,7 +65,6 @@ const emptyState = document.getElementById("emptyState");
 const messagesSection = document.getElementById("messagesSection");
 const messageList = document.getElementById("messageList");
 const privacyOverlay = document.getElementById("privacyOverlay");
-const backToHomeButton = document.getElementById("backToHomeButton");
 
 function showMessage(message, isError = false) {
   gateMessage.textContent = message;
@@ -480,6 +479,7 @@ function openApp() {
   gateScreen.classList.add("hidden");
   chatScreen.classList.remove("hidden");
   currentUserName.textContent = state.currentUser.displayName;
+  window.history.replaceState({ screen: "home" }, "");
   showHome();
   userSearch.value = "";
   userSearch.focus();
@@ -665,6 +665,10 @@ async function openConversationWithUser(userId) {
   emptyState.classList.add("hidden");
   messagesSection.classList.remove("hidden");
   searchResults.innerHTML = "";
+  const historyState = window.history.state;
+  if (!historyState || historyState.screen !== "chat" || historyState.partnerId !== partner.id) {
+    window.history.pushState({ screen: "chat", partnerId: partner.id }, "");
+  }
 
   try {
     await getConversationKey(partner.id);
@@ -881,8 +885,15 @@ document.getElementById("resetDeviceButton").addEventListener("click", () => {
 });
 document.getElementById("lockButton").addEventListener("click", lockApp);
 document.getElementById("messageForm").addEventListener("submit", sendMessage);
-backToHomeButton.addEventListener("click", showHome);
 userSearch.addEventListener("input", (event) => searchUsers(event.target.value));
+window.addEventListener("popstate", (event) => {
+  if (event.state?.screen === "chat" && event.state?.partnerId) {
+    openConversationWithUser(event.state.partnerId).catch(() => {});
+    return;
+  }
+
+  showHome();
+});
 
 async function bootstrap() {
   if (!ensureFirebase()) {
