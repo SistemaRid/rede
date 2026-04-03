@@ -22,6 +22,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  background: #000000;
 }
 
 body {
@@ -47,6 +48,7 @@ button {
 
 .app {
   min-height: 100vh;
+  background: #000000;
 }
 
 .gate-screen,
@@ -177,12 +179,12 @@ input:focus {
 
 .chat-screen {
   display: block;
-  padding: 20px;
+  padding: 0;
 }
 
 .chat-panel {
   border-radius: var(--radius-xl);
-  border: 1px solid var(--line);
+  border: 0;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.02));
   box-shadow: var(--shadow);
 }
@@ -303,12 +305,15 @@ input:focus {
   display: grid;
   grid-template-rows: auto 1fr;
   overflow: hidden;
-  min-height: calc(100vh - 40px);
+  min-height: 100vh;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
 }
 
 .chat-header {
   padding: 20px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .empty-state,
@@ -317,7 +322,7 @@ input:focus {
 }
 
 .empty-state {
-  padding: 40px;
+  padding: 18px 10px 12px;
 }
 
 .app-home {
@@ -325,10 +330,10 @@ input:focus {
 }
 
 .home-panel {
-  width: min(860px, 100%);
-  margin: 0 auto;
+  width: min(1040px, 100%);
+  margin: 0;
   display: grid;
-  gap: 18px;
+  gap: 10px;
 }
 
 .home-search {
@@ -337,7 +342,7 @@ input:focus {
 
 .home-search-results,
 .conversation-badges {
-  max-height: 260px;
+  max-height: 320px;
   overflow: auto;
 }
 
@@ -466,19 +471,53 @@ input:focus {
 
 @media (max-width: 960px) {
   .chat-screen {
-    padding: 14px;
+    padding: 0;
   }
 }
 
 @media (max-width: 640px) {
   .gate-screen,
   .chat-screen {
-    padding: 12px;
+    padding: 0;
   }
 
   .gate-panel,
   .chat-panel {
-    border-radius: 24px;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .chat-header,
+  .active-chat-bar,
+  .message-list,
+  .message-form {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .empty-state {
+    padding: 12px 8px 10px;
+  }
+
+  .home-panel {
+    width: 100%;
+    gap: 8px;
+  }
+
+  .search-result,
+  .conversation-badge {
+    width: 100%;
+    padding: 14px 12px;
+    border-radius: 12px;
+  }
+
+  .search-box input,
+  .message-form input {
+    border-radius: 12px;
+  }
+
+  .home-conversations-title {
+    margin-top: 2px;
   }
 
   .chat-actions {
