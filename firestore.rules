@@ -1,0 +1,62 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isConversationActor(userId, partnerId) {
+      return signedIn() &&
+        (request.auth.uid == userId || request.auth.uid == partnerId);
+    }
+
+    function hasValidParticipants(data, userId, partnerId) {
+      return data.participantIds is list &&
+        data.participantIds.size() == 2 &&
+        userId in data.participantIds &&
+        partnerId in data.participantIds;
+    }
+
+    match /directory/{userId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isSelf(userId);
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+
+      match /private/secret {
+        allow read, create, update, delete: if isSelf(userId);
+      }
+
+      match /contacts/{partnerId} {
+        allow read: if isSelf(userId);
+        allow create, update: if isConversationActor(userId, partnerId) &&
+          request.resource.data.ownerId == userId &&
+          request.resource.data.partnerId == partnerId &&
+          hasValidParticipants(request.resource.data, userId, partnerId) &&
+          request.resource.data.conversationId is string &&
+          request.resource.data.lastMessageLabel is string;
+        allow delete: if isSelf(userId);
+
+        match /messages/{messageId} {
+          allow read: if isSelf(userId);
+          allow create: if isConversationActor(userId, partnerId) &&
+            request.resource.data.senderId == request.auth.uid &&
+            request.resource.data.recipientId is string &&
+            request.resource.data.recipientId in [userId, partnerId] &&
+            request.resource.data.conversationId is string &&
+            request.resource.data.ciphertext is string &&
+            request.resource.data.iv is string;
+          allow delete: if isSelf(userId);
+          allow update: if false;
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#000000">
+  <title>Noite | Chat 24h</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="privacyOverlay" class="privacy-overlay hidden" aria-hidden="true">
+    <div class="privacy-card">
+      <p class="privacy-title">Hoje não, seu safadinho.</p>
+      <pre class="privacy-face">  .-.
+ (o o)
+ | O \
+  \   \
+   `~~~'</pre>
+      <p class="privacy-copy">Tela protegida. Volta pro chat com boas intenções.</p>
+    </div>
+  </div>
+
+  <div class="app">
+    <section id="gateScreen" class="gate-screen">
+      <div class="gate-panel">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <div>
+            <p class="eyebrow">Privado · efêmero · direto</p>
+            <h1>Noite</h1>
+          </div>
+        </div>
+
+        <p id="gateIntro" class="gate-copy">
+          Chat privado com mensagens que se apagam sozinhas em 24 horas.
+        </p>
+
+        <form id="registerForm" class="gate-form hidden">
+          <label>
+            <span>Seu nome no app</span>
+            <input id="registerName" type="text" maxlength="30" placeholder="Ex.: Larissa">
+          </label>
+          <label>
+            <span>Crie sua senha</span>
+            <input id="registerPassword" type="password" minlength="4" placeholder="Senha">
+          </label>
+          <button type="submit" class="primary-button">Entrar no meu cofre</button>
+        </form>
+
+        <form id="unlockForm" class="gate-form hidden">
+          <p id="unlockName" class="unlock-name"></p>
+          <label>
+            <span>Digite sua senha</span>
+            <input id="unlockPassword" type="password" minlength="4" placeholder="Senha">
+          </label>
+          <button type="submit" class="primary-button">Abrir</button>
+          <button id="resetDeviceButton" type="button" class="ghost-button">Esqueci / trocar aparelho</button>
+        </form>
+
+        <p id="gateMessage" class="status-text"></p>
+      </div>
+    </section>
+
+    <section id="chatScreen" class="chat-screen hidden">
+      <main class="chat-panel">
+        <header class="chat-header">
+          <div class="user-head">
+            <p class="eyebrow">Noite</p>
+            <h2 id="currentUserName"></h2>
+          </div>
+          <div class="chat-actions">
+            <button id="lockButton" class="icon-button" title="Bloquear">Bloquear</button>
+          </div>
+        </header>
+
+        <div id="emptyState" class="empty-state app-home">
+          <div class="home-panel">
+            <div class="search-box home-search">
+              <label for="userSearch">Pesquisar pessoa</label>
+              <input id="userSearch" type="search" placeholder="Digite o nome de quem voce quer chamar">
+            </div>
+
+            <div id="searchResults" class="search-results home-search-results"></div>
+
+            <div class="section-title-row home-conversations-title">
+              <h3>Conversas</h3>
+              <span class="muted-tag">24h</span>
+            </div>
+
+            <div id="conversationList" class="conversation-badges"></div>
+          </div>
+        </div>
+
+        <section id="messagesSection" class="messages-section hidden">
+          <header class="active-chat-bar">
+            <button id="backToHomeButton" class="ghost-button" type="button">Voltar</button>
+            <div class="active-chat-copy">
+              <p class="eyebrow">Chat efemero</p>
+              <h3 id="activeChatName">Selecione alguem</h3>
+            </div>
+          </header>
+          <div id="messageList" class="message-list"></div>
+          <form id="messageForm" class="message-form">
+            <input id="messageInput" type="text" maxlength="600" placeholder="Digite uma mensagem">
+            <button type="submit" class="primary-button">Enviar</button>
+          </form>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
