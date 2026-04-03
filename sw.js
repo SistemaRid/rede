@@ -1,4 +1,4 @@
-const CACHE_NAME = "rede-privada-v1";
+const CACHE_NAME = "rede-privada-v2";
 const APP_ASSETS = [
   "./",
   "./index.html",
