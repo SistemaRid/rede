@@ -103,15 +103,30 @@
         <section id="messagesSection" class="messages-section hidden">
           <header class="active-chat-bar">
             <button id="backToHomeButton" class="ghost-button" type="button">Voltar</button>
-            <div class="active-chat-copy">
-              <p class="eyebrow">Chat efemero</p>
-              <h3 id="activeChatName">Selecione alguem</h3>
+            <div class="active-chat-identity">
+              <div id="activeChatAvatar" class="avatar-badge active-chat-avatar" aria-hidden="true">?</div>
+              <div class="active-chat-copy">
+                <p class="eyebrow">Chat efemero</p>
+                <h3 id="activeChatName">Selecione alguem</h3>
+                <p class="active-chat-subtitle">Mensagens criptografadas e temporarias.</p>
+              </div>
             </div>
           </header>
           <div id="messageList" class="message-list"></div>
           <form id="messageForm" class="message-form">
-            <input id="messageInput" type="text" maxlength="600" placeholder="Digite uma mensagem">
-            <button type="submit" class="primary-button">Enviar</button>
+            <div class="message-compose">
+              <button type="button" class="attach-button" aria-label="Anexar">
+                <span aria-hidden="true">+</span>
+              </button>
+              <div class="message-compose-field">
+                <input id="messageInput" type="text" maxlength="600" placeholder="Digite uma mensagem">
+                <button type="submit" class="send-button" aria-label="Enviar mensagem">
+                  <svg class="send-icon" viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M20 16L48 32L20 48L26 35H14L20 29L26 29Z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </form>
         </section>
       </main>

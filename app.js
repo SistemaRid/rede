@@ -60,6 +60,7 @@ const userSearch = document.getElementById("userSearch");
 const searchResults = document.getElementById("searchResults");
 const conversationList = document.getElementById("conversationList");
 const activeChatName = document.getElementById("activeChatName");
+const activeChatAvatar = document.getElementById("activeChatAvatar");
 const emptyState = document.getElementById("emptyState");
 const messagesSection = document.getElementById("messagesSection");
 const messageList = document.getElementById("messageList");
@@ -134,6 +135,10 @@ function makeConversationId(a, b) {
 function makeAvatarMarkup(name) {
   const initial = escapeHtml((name || "?").trim().charAt(0).toUpperCase() || "?");
   return `<div class="avatar-badge" aria-hidden="true">${initial}</div>`;
+}
+
+function getAvatarInitial(name) {
+  return (name || "?").trim().charAt(0).toUpperCase() || "?";
 }
 
 async function hashPassword(value) {
@@ -487,6 +492,7 @@ function showHome() {
   emptyState.classList.remove("hidden");
   messagesSection.classList.add("hidden");
   activeChatName.textContent = "Selecione alguem";
+  activeChatAvatar.textContent = "?";
 }
 
 function lockApp() {
@@ -655,6 +661,7 @@ async function openConversationWithUser(userId) {
   const partner = { id: userId, ...userSnap.data() };
   state.activePartner = partner;
   activeChatName.textContent = partner.displayName;
+  activeChatAvatar.textContent = getAvatarInitial(partner.displayName);
   emptyState.classList.add("hidden");
   messagesSection.classList.remove("hidden");
   searchResults.innerHTML = "";
