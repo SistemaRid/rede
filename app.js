@@ -89,7 +89,7 @@ function explainFirebaseError(error, fallbackMessage) {
   const errorCode = error?.code || "";
 
   if (errorCode === "auth/operation-not-allowed") {
-    return "Ative Authentication > Sign-in method > Anonymous no Firebase.";
+    return "Ative Authentication > Sign-in method > Email/Password no Firebase.";
   }
 
   if (errorCode === "auth/api-key-not-valid.-please-pass-a-valid-api-key.") {
@@ -102,6 +102,18 @@ function explainFirebaseError(error, fallbackMessage) {
 
   if (errorCode === "permission-denied" || errorCode === "firestore/permission-denied") {
     return "As regras do Firestore ainda nao permitem esta operacao.";
+  }
+
+  if (errorCode === "auth/invalid-credential" || errorCode === "auth/wrong-password") {
+    return "Nome ou senha incorretos.";
+  }
+
+  if (errorCode === "auth/email-already-in-use") {
+    return "Esse nome ja esta em uso. Escolha outro.";
+  }
+
+  if (errorCode === "auth/user-not-found") {
+    return "Essa conta ainda nao existe.";
   }
 
   if (errorCode) {
@@ -644,7 +656,8 @@ async function handleAuth(event) {
       return;
     }
 
-    showMessage("Nao consegui entrar agora.", true);
+    console.error("Auth error:", error);
+    showMessage(explainFirebaseError(error, "Nao consegui entrar agora."), true);
   }
 }
 
