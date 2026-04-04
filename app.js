@@ -1,10 +1,12 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
+  createUserWithEmailAndPassword,
+  deleteUser,
   getAuth,
   inMemoryPersistence,
   onAuthStateChanged,
+  signInWithEmailAndPassword,
   setPersistence,
-  signInAnonymously,
   signOut
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import {
@@ -159,6 +161,16 @@ function makeMessageId() {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function makeAuthEmail(lowerDisplayName) {
+  const normalized = lowerDisplayName
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, ".");
+
+  const safeName = normalized.replace(/^\.+|\.+$/g, "") || "usuario";
+  return `${safeName}.${bytesToHex(new TextEncoder().encode(lowerDisplayName)).slice(0, 12)}@redeprivada.app`;
+}
+
 function generateUserCode() {
   const min = 10 ** (USER_CODE_LENGTH - 1);
   const max = (10 ** USER_CODE_LENGTH) - 1;
@@ -248,6 +260,11 @@ function bytesToBase64(buffer) {
     binary += String.fromCharCode(byte);
   });
   return btoa(binary);
+}
+
+function bytesToHex(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function base64ToBytes(value) {
@@ -548,11 +565,49 @@ async function handleAuth(event) {
 
   try {
     const lowerDisplayName = displayName.toLowerCase();
+    const authEmail = makeAuthEmail(lowerDisplayName);
     const reservedUsernameSnap = await getDoc(usernameRef(lowerDisplayName));
+    let authUser = null;
 
     if (reservedUsernameSnap.exists()) {
-      const reservedUsername = reservedUsernameSnap.data();
-      const userId = reservedUsername.userId;
+      try {
+        const signInCredential = await signInWithEmailAndPassword(auth, authEmail, password);
+        authUser = signInCredential.user;
+      } catch (error) {
+        if (error?.code === "auth/wrong-password" || error?.code === "auth/invalid-credential") {
+          throw new Error("INVALID_PASSWORD");
+        }
+
+        throw error;
+      }
+    } else {
+      try {
+        const createCredential = await createUserWithEmailAndPassword(auth, authEmail, password);
+        authUser = createCredential.user;
+        await createUser(authUser.uid, displayName, password);
+      } catch (createError) {
+        if (createError?.code === "auth/email-already-in-use") {
+          throw new Error("USERNAME_ALREADY_EXISTS");
+        }
+
+        if (auth.currentUser) {
+          await deleteUser(auth.currentUser).catch(() => {});
+        }
+
+        throw createError;
+      }
+    }
+
+    if (!authUser) {
+      if (reservedUsernameSnap.exists()) {
+        throw new Error("INVALID_PASSWORD");
+      }
+
+      throw new Error("PROFILE_NOT_FOUND");
+    }
+
+    if (!state.currentUser) {
+      const userId = authUser?.uid;
       const [profileSnap, secretSnap] = await Promise.all([
         getDoc(directoryRef(userId)),
         getDoc(secretRef(userId))
@@ -563,12 +618,10 @@ async function handleAuth(event) {
       }
 
       await unlockExistingUser(userId, profileSnap, secretSnap, displayName, password);
-    } else {
-      await createUser(auth.currentUser.uid, displayName, password);
     }
 
     authPassword.value = "";
-    deviceHint.textContent = state.currentUser.userCode ? `Seu IP: ${state.currentUser.userCode}` : "";
+    deviceHint.textContent = state.currentUser.userCode ? `Seu ID: ${state.currentUser.userCode}` : "";
     openApp();
   } catch (error) {
     if (error?.message === "USERNAME_ALREADY_EXISTS") {
@@ -599,13 +652,24 @@ function openApp() {
   gateScreen.classList.add("hidden");
   chatScreen.classList.remove("hidden");
   currentUserName.textContent = state.currentUser.displayName;
-  currentUserCode.textContent = state.currentUser.userCode ? `IP ${state.currentUser.userCode}` : "";
+  currentUserCode.textContent = state.currentUser.userCode ? `ID ${state.currentUser.userCode}` : "Carregando ID...";
   window.history.replaceState({ screen: "home" }, "");
   showHome();
   userSearch.value = "";
   userSearch.focus();
   wireConversationStream();
   cleanupExpiredMessages();
+  syncCurrentUserCode().catch(() => {
+    currentUserCode.textContent = state.currentUser.userCode ? `ID ${state.currentUser.userCode}` : "";
+  });
+}
+
+async function syncCurrentUserCode() {
+  if (!state.currentUser?.id) return;
+
+  const userCode = await ensureUserCode(state.currentUser.id, state.currentUser);
+  state.currentUser.userCode = userCode;
+  currentUserCode.textContent = userCode ? `ID ${userCode}` : "";
 }
 
 function showHome() {
@@ -639,6 +703,7 @@ function lockApp() {
   authPassword.value = "";
   deviceHint.textContent = "";
   showMessage("Digite nome e senha para entrar ou criar sua conta.");
+  signOut(auth).catch(() => {});
 }
 
 async function searchUsers(term) {
@@ -1215,7 +1280,6 @@ async function bootstrap() {
   }
 
   await setPersistence(auth, inMemoryPersistence);
-  await signInAnonymously(auth);
   onAuthStateChanged(auth, async () => {
     await loadKnownUser();
   });
