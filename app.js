@@ -1,7 +1,9 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
   getAuth,
+  inMemoryPersistence,
   onAuthStateChanged,
+  setPersistence,
   signInAnonymously,
   signOut
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
@@ -57,11 +59,11 @@ const state = {
 
 const gateScreen = document.getElementById("gateScreen");
 const chatScreen = document.getElementById("chatScreen");
-const registerForm = document.getElementById("registerForm");
-const unlockForm = document.getElementById("unlockForm");
+const authForm = document.getElementById("authForm");
 const gateMessage = document.getElementById("gateMessage");
-const unlockName = document.getElementById("unlockName");
-const unlockCode = document.getElementById("unlockCode");
+const deviceHint = document.getElementById("deviceHint");
+const authName = document.getElementById("authName");
+const authPassword = document.getElementById("authPassword");
 const currentUserName = document.getElementById("currentUserName");
 const currentUserCode = document.getElementById("currentUserCode");
 const userSearch = document.getElementById("userSearch");
@@ -420,138 +422,153 @@ async function decryptMessageText(ciphertextBase64, ivBase64, key) {
 
 async function loadKnownUser() {
   if (!ensureFirebase()) {
-    registerForm.classList.remove("hidden");
-    unlockForm.classList.add("hidden");
     return;
   }
 
-  const userId = auth.currentUser?.uid;
-  if (!userId) return;
-
-  try {
-    const [profileSnap, secretSnap] = await Promise.all([
-      getDoc(directoryRef(userId)),
-      getDoc(secretRef(userId))
-    ]);
-
-    if (!profileSnap.exists() || !secretSnap.exists()) {
-      registerForm.classList.remove("hidden");
-      unlockForm.classList.add("hidden");
-      showMessage("Crie seu perfil para ativar o cofre criptografado.");
-      return;
-    }
-
-    const profileData = profileSnap.data();
-    const userCode = await ensureUserCode(userId, profileData);
-    unlockName.textContent = `Ola, ${profileData.displayName}`;
-    unlockCode.textContent = userCode ? `IP ${userCode}` : "";
-    registerForm.classList.add("hidden");
-    unlockForm.classList.remove("hidden");
-    showMessage("Seu perfil foi encontrado neste aparelho.");
-  } catch (error) {
-    showMessage("Nao consegui carregar o perfil salvo neste aparelho.", true);
-  }
+  authForm.reset();
+  deviceHint.textContent = "";
+  showMessage("Digite nome e senha para entrar ou criar sua conta.");
 }
 
-async function registerUser(event) {
+async function createUser(userId, displayName, password) {
+  const lowerDisplayName = displayName.toLowerCase();
+  const passwordHash = await hashPassword(password);
+  const keyMaterial = await generateUserKeys();
+  const protectedPrivateKey = await protectPrivateKey(keyMaterial.privateKey, password);
+  const privateKey = await restorePrivateKey(
+    { ...protectedPrivateKey, encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey },
+    password
+  );
+  let userCode = "";
+
+  for (let attempt = 0; attempt < MAX_USER_CODE_ATTEMPTS; attempt += 1) {
+    userCode = generateUserCode();
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const [reservedUsername, reservedUserCode] = await Promise.all([
+          transaction.get(usernameRef(lowerDisplayName)),
+          transaction.get(userCodeRef(userCode))
+        ]);
+
+        if (reservedUsername.exists()) {
+          throw new Error("USERNAME_ALREADY_EXISTS");
+        }
+
+        if (reservedUserCode.exists()) {
+          throw new Error("USER_CODE_ALREADY_EXISTS");
+        }
+
+        transaction.set(directoryRef(userId), {
+          displayName,
+          lowerDisplayName,
+          userCode,
+          publicKey: keyMaterial.publicKey,
+          createdAt: serverTimestamp(),
+          lastSeenAt: serverTimestamp()
+        });
+
+        transaction.set(secretRef(userId), {
+          encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey,
+          salt: protectedPrivateKey.salt,
+          iv: protectedPrivateKey.iv,
+          passwordHash,
+          updatedAt: serverTimestamp()
+        });
+
+        transaction.set(usernameRef(lowerDisplayName), {
+          userId,
+          displayName,
+          lowerDisplayName,
+          createdAt: serverTimestamp()
+        });
+
+        transaction.set(userCodeRef(userCode), {
+          userId,
+          displayName,
+          lowerDisplayName,
+          userCode,
+          createdAt: serverTimestamp()
+        });
+      });
+
+      break;
+    } catch (error) {
+      if (error?.message === "USER_CODE_ALREADY_EXISTS") {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  if (!userCode) {
+    throw new Error("USER_CODE_GENERATION_FAILED");
+  }
+
+  state.currentUser = {
+    id: userId,
+    displayName,
+    lowerDisplayName,
+    userCode,
+    publicKey: keyMaterial.publicKey
+  };
+  state.privateKey = privateKey;
+}
+
+async function unlockExistingUser(userId, profileSnap, secretSnap, displayName, password) {
+  const profileData = profileSnap.data();
+
+  const passwordHash = await hashPassword(password);
+  if (passwordHash !== secretSnap.data().passwordHash) {
+    throw new Error("INVALID_PASSWORD");
+  }
+
+  const privateKey = await restorePrivateKey(secretSnap.data(), password);
+  await setDoc(directoryRef(userId), { lastSeenAt: serverTimestamp() }, { merge: true });
+
+  const userCode = await ensureUserCode(userId, profileData);
+  state.currentUser = { id: userId, ...profileData, userCode };
+  state.privateKey = privateKey;
+}
+
+async function handleAuth(event) {
   event.preventDefault();
   if (!ensureFirebase()) {
     showMessage("Preencha o firebaseConfig em app.js antes de usar.", true);
     return;
   }
 
-  const displayName = document.getElementById("registerName").value.trim();
-  const password = document.getElementById("registerPassword").value.trim();
+  const displayName = authName.value.trim();
+  const password = authPassword.value.trim();
   if (!displayName || !password) {
     showMessage("Preencha nome e senha.", true);
     return;
   }
 
   try {
-    const userId = auth.currentUser.uid;
     const lowerDisplayName = displayName.toLowerCase();
-    const passwordHash = await hashPassword(password);
-    const keyMaterial = await generateUserKeys();
-    const protectedPrivateKey = await protectPrivateKey(keyMaterial.privateKey, password);
-    const privateKey = await restorePrivateKey(
-      { ...protectedPrivateKey, encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey },
-      password
-    );
-    let userCode = "";
+    const reservedUsernameSnap = await getDoc(usernameRef(lowerDisplayName));
 
-    for (let attempt = 0; attempt < MAX_USER_CODE_ATTEMPTS; attempt += 1) {
-      userCode = generateUserCode();
+    if (reservedUsernameSnap.exists()) {
+      const reservedUsername = reservedUsernameSnap.data();
+      const userId = reservedUsername.userId;
+      const [profileSnap, secretSnap] = await Promise.all([
+        getDoc(directoryRef(userId)),
+        getDoc(secretRef(userId))
+      ]);
 
-      try {
-        await runTransaction(db, async (transaction) => {
-          const [reservedUsername, reservedUserCode] = await Promise.all([
-            transaction.get(usernameRef(lowerDisplayName)),
-            transaction.get(userCodeRef(userCode))
-          ]);
-
-          if (reservedUsername.exists()) {
-            throw new Error("USERNAME_ALREADY_EXISTS");
-          }
-
-          if (reservedUserCode.exists()) {
-            throw new Error("USER_CODE_ALREADY_EXISTS");
-          }
-
-          transaction.set(directoryRef(userId), {
-            displayName,
-            lowerDisplayName,
-            userCode,
-            publicKey: keyMaterial.publicKey,
-            createdAt: serverTimestamp(),
-            lastSeenAt: serverTimestamp()
-          });
-
-          transaction.set(secretRef(userId), {
-            encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey,
-            salt: protectedPrivateKey.salt,
-            iv: protectedPrivateKey.iv,
-            passwordHash,
-            updatedAt: serverTimestamp()
-          });
-
-          transaction.set(usernameRef(lowerDisplayName), {
-            userId,
-            displayName,
-            lowerDisplayName,
-            createdAt: serverTimestamp()
-          });
-
-          transaction.set(userCodeRef(userCode), {
-            userId,
-            displayName,
-            lowerDisplayName,
-            userCode,
-            createdAt: serverTimestamp()
-          });
-        });
-
-        break;
-      } catch (error) {
-        if (error?.message === "USER_CODE_ALREADY_EXISTS") {
-          continue;
-        }
-
-        throw error;
+      if (!profileSnap.exists() || !secretSnap.exists()) {
+        throw new Error("PROFILE_NOT_FOUND");
       }
+
+      await unlockExistingUser(userId, profileSnap, secretSnap, displayName, password);
+    } else {
+      await createUser(auth.currentUser.uid, displayName, password);
     }
 
-    if (!userCode) {
-      throw new Error("USER_CODE_GENERATION_FAILED");
-    }
-
-    state.currentUser = {
-      id: userId,
-      displayName,
-      lowerDisplayName,
-      userCode,
-      publicKey: keyMaterial.publicKey
-    };
-    state.privateKey = privateKey;
+    authPassword.value = "";
+    deviceHint.textContent = state.currentUser.userCode ? `Seu IP: ${state.currentUser.userCode}` : "";
     openApp();
   } catch (error) {
     if (error?.message === "USERNAME_ALREADY_EXISTS") {
@@ -564,75 +581,18 @@ async function registerUser(event) {
       return;
     }
 
-    showMessage("Nao consegui criar seu acesso criptografado agora.", true);
-  }
-}
-
-async function unlockUser(event) {
-  event.preventDefault();
-  if (!ensureFirebase()) {
-    showMessage("Preencha o firebaseConfig em app.js antes de usar.", true);
-    return;
-  }
-
-  const userId = auth.currentUser?.uid;
-  const password = document.getElementById("unlockPassword").value.trim();
-  if (!userId || !password) {
-    showMessage("Digite sua senha.", true);
-    return;
-  }
-
-  try {
-    const [profileSnap, secretSnap] = await Promise.all([
-      getDoc(directoryRef(userId)),
-      getDoc(secretRef(userId))
-    ]);
-
-    if (!profileSnap.exists() || !secretSnap.exists()) {
-      showMessage("Perfil nao encontrado neste aparelho.", true);
-      return;
-    }
-
-    const passwordHash = await hashPassword(password);
-    if (passwordHash !== secretSnap.data().passwordHash) {
+    if (error?.message === "INVALID_PASSWORD") {
       showMessage("Senha incorreta.", true);
       return;
     }
 
-    const privateKey = await restorePrivateKey(secretSnap.data(), password);
-    await setDoc(directoryRef(userId), { lastSeenAt: serverTimestamp() }, { merge: true });
+    if (error?.message === "PROFILE_NOT_FOUND") {
+      showMessage("Nao consegui encontrar essa conta agora.", true);
+      return;
+    }
 
-    const profileData = profileSnap.data();
-    const userCode = await ensureUserCode(userId, profileData);
-    state.currentUser = { id: userId, ...profileData, userCode };
-    state.privateKey = privateKey;
-    openApp();
-  } catch (error) {
-    showMessage("Nao consegui validar sua senha.", true);
+    showMessage("Nao consegui entrar agora.", true);
   }
-}
-
-async function resetDevice() {
-  if (!ensureFirebase()) {
-    registerForm.classList.remove("hidden");
-    unlockForm.classList.add("hidden");
-    showMessage("Preencha o Firebase antes de continuar.", true);
-    return;
-  }
-
-  state.currentUser = null;
-  state.privateKey = null;
-  state.activePartner = null;
-  state.conversationKeys.clear();
-  unlockForm.reset();
-  registerForm.reset();
-  registerForm.classList.remove("hidden");
-  unlockForm.classList.add("hidden");
-  if (state.unsubscribeMessages) state.unsubscribeMessages();
-  if (state.unsubscribeConversations) state.unsubscribeConversations();
-  await signOut(auth);
-  await signInAnonymously(auth);
-  showMessage("Este aparelho foi desvinculado.");
 }
 
 function openApp() {
@@ -675,11 +635,10 @@ function lockApp() {
   searchResults.innerHTML = "";
   emptyState.classList.remove("hidden");
   messagesSection.classList.add("hidden");
-  unlockForm.classList.remove("hidden");
-  registerForm.classList.add("hidden");
-  document.getElementById("unlockPassword").value = "";
-  unlockName.textContent = `Ola, ${state.currentUser.displayName}`;
-  unlockCode.textContent = state.currentUser.userCode ? `IP ${state.currentUser.userCode}` : "";
+  authName.value = "";
+  authPassword.value = "";
+  deviceHint.textContent = "";
+  showMessage("Digite nome e senha para entrar ou criar sua conta.");
 }
 
 async function searchUsers(term) {
@@ -1230,11 +1189,7 @@ messageList.addEventListener("pointerup", clearLongPressTimer);
 messageList.addEventListener("pointercancel", clearLongPressTimer);
 messageList.addEventListener("pointerleave", clearLongPressTimer);
 
-registerForm.addEventListener("submit", registerUser);
-unlockForm.addEventListener("submit", unlockUser);
-document.getElementById("resetDeviceButton").addEventListener("click", () => {
-  resetDevice().catch(() => showMessage("Nao consegui trocar o aparelho agora.", true));
-});
+authForm.addEventListener("submit", handleAuth);
 document.getElementById("lockButton").addEventListener("click", lockApp);
 messageForm.addEventListener("submit", sendMessage);
 messageInput.addEventListener("keydown", (event) => {
@@ -1256,10 +1211,10 @@ window.addEventListener("popstate", (event) => {
 async function bootstrap() {
   if (!ensureFirebase()) {
     showMessage("Preencha o firebaseConfig em app.js para conectar o app ao Firebase.");
-    registerForm.classList.remove("hidden");
     return;
   }
 
+  await setPersistence(auth, inMemoryPersistence);
   await signInAnonymously(auth);
   onAuthStateChanged(auth, async () => {
     await loadKnownUser();
@@ -1268,7 +1223,6 @@ async function bootstrap() {
 
 if (!isFirebaseConfigured()) {
   showMessage("Preencha o firebaseConfig em app.js para conectar o app ao Firebase.");
-  registerForm.classList.remove("hidden");
 } else {
   if ("scrollRestoration" in history) {
     history.scrollRestoration = "manual";
@@ -1277,13 +1231,25 @@ if (!isFirebaseConfigured()) {
   bootstrap().catch((error) => {
     console.error("Firebase bootstrap error:", error);
     showMessage(explainFirebaseError(error, "Nao consegui iniciar o Firebase agora."), true);
-    registerForm.classList.remove("hidden");
   });
 }
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
+if ("serviceWorker" in navigator || "caches" in window) {
+  window.addEventListener("load", async () => {
     lockViewportPosition();
-    navigator.serviceWorker.register("./sw.js").catch(() => {});
+
+    try {
+      if ("serviceWorker" in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+      }
+
+      if ("caches" in window) {
+        const cacheKeys = await caches.keys();
+        await Promise.all(cacheKeys.map((cacheKey) => caches.delete(cacheKey)));
+      }
+    } catch (error) {
+      console.warn("Nao consegui limpar os caches locais do navegador.", error);
+    }
   });
 }

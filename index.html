@@ -100,27 +100,17 @@ $F        `'      &lt;!               !!!               !!&gt;    !!
           Chat privado com mensagens que se apagam sozinhas em 24 horas. Cada conta recebe um ID unico de 5 digitos.
         </p>
 
-        <form id="registerForm" class="gate-form hidden">
+        <form id="authForm" class="gate-form">
           <label>
             <span>Seu nome no app</span>
-            <input id="registerName" type="text" maxlength="30" placeholder="Ex.: Larissa">
+            <input id="authName" type="text" maxlength="30" placeholder="Ex.: Larissa">
           </label>
           <label>
-            <span>Crie sua senha</span>
-            <input id="registerPassword" type="password" minlength="4" placeholder="Senha">
+            <span>Sua senha</span>
+            <input id="authPassword" type="password" minlength="4" placeholder="Senha">
           </label>
-          <button type="submit" class="primary-button">Entrar no meu cofre</button>
-        </form>
-
-        <form id="unlockForm" class="gate-form hidden">
-          <p id="unlockName" class="unlock-name"></p>
-          <p id="unlockCode" class="status-text"></p>
-          <label>
-            <span>Digite sua senha</span>
-            <input id="unlockPassword" type="password" minlength="4" placeholder="Senha">
-          </label>
-          <button type="submit" class="primary-button">Abrir</button>
-          <button id="resetDeviceButton" type="button" class="ghost-button">Esqueci / trocar aparelho</button>
+          <p id="deviceHint" class="status-text"></p>
+          <button type="submit" class="primary-button">Entrar</button>
         </form>
 
         <p id="gateMessage" class="status-text"></p>
