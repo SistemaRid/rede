@@ -6,7 +6,6 @@ import {
   signOut
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import {
-  addDoc,
   collection,
   deleteDoc,
   doc,
@@ -17,6 +16,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   where,
@@ -34,6 +34,8 @@ const firebaseConfig = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PBKDF2_ITERATIONS = 250000;
+const USER_CODE_LENGTH = 5;
+const MAX_USER_CODE_ATTEMPTS = 20;
 
 let app = null;
 let auth = null;
@@ -46,7 +48,11 @@ const state = {
   unsubscribeMessages: null,
   unsubscribeConversations: null,
   privacyTimer: null,
-  conversationKeys: new Map()
+  conversationKeys: new Map(),
+  pendingMessages: new Map(),
+  currentMessages: [],
+  longPressTimer: null,
+  activeMessageActionId: null
 };
 
 const gateScreen = document.getElementById("gateScreen");
@@ -55,7 +61,9 @@ const registerForm = document.getElementById("registerForm");
 const unlockForm = document.getElementById("unlockForm");
 const gateMessage = document.getElementById("gateMessage");
 const unlockName = document.getElementById("unlockName");
+const unlockCode = document.getElementById("unlockCode");
 const currentUserName = document.getElementById("currentUserName");
+const currentUserCode = document.getElementById("currentUserCode");
 const userSearch = document.getElementById("userSearch");
 const searchResults = document.getElementById("searchResults");
 const conversationList = document.getElementById("conversationList");
@@ -65,6 +73,8 @@ const emptyState = document.getElementById("emptyState");
 const messagesSection = document.getElementById("messagesSection");
 const messageList = document.getElementById("messageList");
 const privacyOverlay = document.getElementById("privacyOverlay");
+const messageForm = document.getElementById("messageForm");
+const messageInput = document.getElementById("messageInput");
 
 function showMessage(message, isError = false) {
   gateMessage.textContent = message;
@@ -119,6 +129,14 @@ function secretRef(userId) {
   return doc(db, "users", userId, "private", "secret");
 }
 
+function usernameRef(lowerDisplayName) {
+  return doc(db, "usernames", lowerDisplayName);
+}
+
+function userCodeRef(userCode) {
+  return doc(db, "userCodes", userCode);
+}
+
 function contactRef(ownerId, partnerId) {
   return doc(db, "users", ownerId, "contacts", partnerId);
 }
@@ -127,8 +145,83 @@ function messagesCollection(ownerId, partnerId) {
   return collection(db, "users", ownerId, "contacts", partnerId, "messages");
 }
 
+function messageRef(ownerId, partnerId, messageId) {
+  return doc(db, "users", ownerId, "contacts", partnerId, "messages", messageId);
+}
+
 function makeConversationId(a, b) {
   return [a, b].sort().join("__");
+}
+
+function makeMessageId() {
+  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function generateUserCode() {
+  const min = 10 ** (USER_CODE_LENGTH - 1);
+  const max = (10 ** USER_CODE_LENGTH) - 1;
+  return String(Math.floor(Math.random() * (max - min + 1)) + min);
+}
+
+async function ensureUserCode(userId, profileData) {
+  if (profileData?.userCode) {
+    return profileData.userCode;
+  }
+
+  const displayName = profileData?.displayName || "";
+  const lowerDisplayName = profileData?.lowerDisplayName || displayName.toLowerCase();
+
+  for (let attempt = 0; attempt < MAX_USER_CODE_ATTEMPTS; attempt += 1) {
+    const userCode = generateUserCode();
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const [profileSnap, reservedUserCode] = await Promise.all([
+          transaction.get(directoryRef(userId)),
+          transaction.get(userCodeRef(userCode))
+        ]);
+
+        if (!profileSnap.exists()) {
+          throw new Error("PROFILE_NOT_FOUND");
+        }
+
+        const currentProfile = profileSnap.data();
+        if (currentProfile.userCode) {
+          throw new Error(`USER_CODE_READY:${currentProfile.userCode}`);
+        }
+
+        if (reservedUserCode.exists()) {
+          throw new Error("USER_CODE_ALREADY_EXISTS");
+        }
+
+        transaction.set(directoryRef(userId), {
+          userCode
+        }, { merge: true });
+
+        transaction.set(userCodeRef(userCode), {
+          userId,
+          displayName: currentProfile.displayName || displayName,
+          lowerDisplayName: currentProfile.lowerDisplayName || lowerDisplayName,
+          userCode,
+          createdAt: serverTimestamp()
+        });
+      });
+
+      return userCode;
+    } catch (error) {
+      if (error?.message === "USER_CODE_ALREADY_EXISTS") {
+        continue;
+      }
+
+      if (error?.message?.startsWith("USER_CODE_READY:")) {
+        return error.message.split(":")[1];
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error("USER_CODE_GENERATION_FAILED");
 }
 
 function makeAvatarMarkup(name) {
@@ -348,7 +441,10 @@ async function loadKnownUser() {
       return;
     }
 
-    unlockName.textContent = `Ola, ${profileSnap.data().displayName}`;
+    const profileData = profileSnap.data();
+    const userCode = await ensureUserCode(userId, profileData);
+    unlockName.textContent = `Ola, ${profileData.displayName}`;
+    unlockCode.textContent = userCode ? `IP ${userCode}` : "";
     registerForm.classList.add("hidden");
     unlockForm.classList.remove("hidden");
     showMessage("Seu perfil foi encontrado neste aparelho.");
@@ -373,6 +469,7 @@ async function registerUser(event) {
 
   try {
     const userId = auth.currentUser.uid;
+    const lowerDisplayName = displayName.toLowerCase();
     const passwordHash = await hashPassword(password);
     const keyMaterial = await generateUserKeys();
     const protectedPrivateKey = await protectPrivateKey(keyMaterial.privateKey, password);
@@ -380,32 +477,93 @@ async function registerUser(event) {
       { ...protectedPrivateKey, encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey },
       password
     );
+    let userCode = "";
 
-    await setDoc(directoryRef(userId), {
-      displayName,
-      lowerDisplayName: displayName.toLowerCase(),
-      publicKey: keyMaterial.publicKey,
-      createdAt: serverTimestamp(),
-      lastSeenAt: serverTimestamp()
-    });
+    for (let attempt = 0; attempt < MAX_USER_CODE_ATTEMPTS; attempt += 1) {
+      userCode = generateUserCode();
 
-    await setDoc(secretRef(userId), {
-      encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey,
-      salt: protectedPrivateKey.salt,
-      iv: protectedPrivateKey.iv,
-      passwordHash,
-      updatedAt: serverTimestamp()
-    });
+      try {
+        await runTransaction(db, async (transaction) => {
+          const [reservedUsername, reservedUserCode] = await Promise.all([
+            transaction.get(usernameRef(lowerDisplayName)),
+            transaction.get(userCodeRef(userCode))
+          ]);
+
+          if (reservedUsername.exists()) {
+            throw new Error("USERNAME_ALREADY_EXISTS");
+          }
+
+          if (reservedUserCode.exists()) {
+            throw new Error("USER_CODE_ALREADY_EXISTS");
+          }
+
+          transaction.set(directoryRef(userId), {
+            displayName,
+            lowerDisplayName,
+            userCode,
+            publicKey: keyMaterial.publicKey,
+            createdAt: serverTimestamp(),
+            lastSeenAt: serverTimestamp()
+          });
+
+          transaction.set(secretRef(userId), {
+            encryptedPrivateKey: protectedPrivateKey.encryptedPrivateKey,
+            salt: protectedPrivateKey.salt,
+            iv: protectedPrivateKey.iv,
+            passwordHash,
+            updatedAt: serverTimestamp()
+          });
+
+          transaction.set(usernameRef(lowerDisplayName), {
+            userId,
+            displayName,
+            lowerDisplayName,
+            createdAt: serverTimestamp()
+          });
+
+          transaction.set(userCodeRef(userCode), {
+            userId,
+            displayName,
+            lowerDisplayName,
+            userCode,
+            createdAt: serverTimestamp()
+          });
+        });
+
+        break;
+      } catch (error) {
+        if (error?.message === "USER_CODE_ALREADY_EXISTS") {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    if (!userCode) {
+      throw new Error("USER_CODE_GENERATION_FAILED");
+    }
 
     state.currentUser = {
       id: userId,
       displayName,
-      lowerDisplayName: displayName.toLowerCase(),
+      lowerDisplayName,
+      userCode,
       publicKey: keyMaterial.publicKey
     };
     state.privateKey = privateKey;
     openApp();
   } catch (error) {
+    if (error?.message === "USERNAME_ALREADY_EXISTS") {
+      showMessage("Esse nome ja esta em uso. Escolha outro.", true);
+      return;
+    }
+
+    if (error?.message === "USER_CODE_GENERATION_FAILED") {
+      showMessage("Nao consegui gerar um ID unico agora. Tente novamente.", true);
+      return;
+    }
+
     showMessage("Nao consegui criar seu acesso criptografado agora.", true);
   }
 }
@@ -444,7 +602,9 @@ async function unlockUser(event) {
     const privateKey = await restorePrivateKey(secretSnap.data(), password);
     await setDoc(directoryRef(userId), { lastSeenAt: serverTimestamp() }, { merge: true });
 
-    state.currentUser = { id: userId, ...profileSnap.data() };
+    const profileData = profileSnap.data();
+    const userCode = await ensureUserCode(userId, profileData);
+    state.currentUser = { id: userId, ...profileData, userCode };
     state.privateKey = privateKey;
     openApp();
   } catch (error) {
@@ -479,6 +639,7 @@ function openApp() {
   gateScreen.classList.add("hidden");
   chatScreen.classList.remove("hidden");
   currentUserName.textContent = state.currentUser.displayName;
+  currentUserCode.textContent = state.currentUser.userCode ? `IP ${state.currentUser.userCode}` : "";
   window.history.replaceState({ screen: "home" }, "");
   showHome();
   userSearch.value = "";
@@ -489,6 +650,8 @@ function openApp() {
 
 function showHome() {
   state.activePartner = null;
+  state.currentMessages = [];
+  state.activeMessageActionId = null;
   emptyState.classList.remove("hidden");
   messagesSection.classList.add("hidden");
   activeChatName.textContent = "Selecione alguem";
@@ -503,6 +666,8 @@ function lockApp() {
   state.activePartner = null;
   state.privateKey = null;
   state.conversationKeys.clear();
+  state.currentMessages = [];
+  state.activeMessageActionId = null;
   gateScreen.classList.remove("hidden");
   chatScreen.classList.add("hidden");
   messageList.innerHTML = "";
@@ -514,42 +679,48 @@ function lockApp() {
   registerForm.classList.add("hidden");
   document.getElementById("unlockPassword").value = "";
   unlockName.textContent = `Ola, ${state.currentUser.displayName}`;
+  unlockCode.textContent = state.currentUser.userCode ? `IP ${state.currentUser.userCode}` : "";
 }
 
 async function searchUsers(term) {
   if (!ensureFirebase()) return;
-  if (!term.trim()) {
+  const normalizedTerm = term.replace(/\D/g, "").slice(0, USER_CODE_LENGTH);
+  userSearch.value = normalizedTerm;
+
+  if (!normalizedTerm) {
     searchResults.innerHTML = "";
     return;
   }
 
-  const lower = term.trim().toLowerCase();
-  const q = query(
-    collection(db, "directory"),
-    where("lowerDisplayName", ">=", lower),
-    where("lowerDisplayName", "<=", `${lower}\uf8ff`),
-    limit(12)
-  );
+  if (normalizedTerm.length < USER_CODE_LENGTH) {
+    searchResults.innerHTML = `<div class="search-result"><div class="badge-main">${makeAvatarMarkup("#")}<div class="person-meta"><span class="person-name">Digite os 5 numeros do ID</span><span class="person-hint">A busca funciona so pelo ID completo</span></div></div></div>`;
+    return;
+  }
 
-  const snapshot = await getDocs(q);
-  const users = snapshot.docs
-    .map((item) => ({ id: item.id, ...item.data() }))
-    .filter((item) => item.id !== state.currentUser.id);
+  const userCodeSnap = await getDoc(userCodeRef(normalizedTerm));
+  if (!userCodeSnap.exists()) {
+    searchResults.innerHTML = `<div class="search-result"><div class="badge-main">${makeAvatarMarkup("N")}<div class="person-meta"><span class="person-name">ID nao encontrado</span><span class="person-hint">Confira os 5 numeros e tente novamente</span></div></div></div>`;
+    return;
+  }
 
-  searchResults.innerHTML = users.length
-    ? users.map((user) => `
-      <button class="search-result" data-open-user="${user.id}" type="button">
+  const user = userCodeSnap.data();
+  if (user.userId === state.currentUser.id) {
+    searchResults.innerHTML = `<div class="search-result"><div class="badge-main">${makeAvatarMarkup("Y")}<div class="person-meta"><span class="person-name">Esse ID e o seu</span><span class="person-hint">Use o ID de outra pessoa para abrir conversa</span></div></div></div>`;
+    return;
+  }
+
+  searchResults.innerHTML = `
+      <button class="search-result" data-open-user="${user.userId}" type="button">
         <div class="badge-main">
           ${makeAvatarMarkup(user.displayName)}
           <div class="person-meta">
             <span class="person-name">${escapeHtml(user.displayName)}</span>
-            <span class="person-hint">Abrir conversa privada</span>
+            <span class="person-hint">ID ${escapeHtml(user.userCode || normalizedTerm)}</span>
           </div>
         </div>
         <span class="muted-tag">Cript.</span>
       </button>
-    `).join("")
-    : `<div class="search-result"><div class="badge-main">${makeAvatarMarkup("Ninguem")}<div class="person-meta"><span class="person-name">Ninguem encontrado</span><span class="person-hint">Tente outro nome</span></div></div></div>`;
+    `;
 }
 
 function wireConversationStream() {
@@ -660,6 +831,8 @@ async function openConversationWithUser(userId) {
 
   const partner = { id: userId, ...userSnap.data() };
   state.activePartner = partner;
+  state.currentMessages = [];
+  state.activeMessageActionId = null;
   activeChatName.textContent = partner.displayName;
   activeChatAvatar.textContent = getAvatarInitial(partner.displayName);
   emptyState.classList.add("hidden");
@@ -710,30 +883,123 @@ function wireMessages(partnerId) {
       messages.push({ id: item.id, ...data, text });
     }
 
+    state.currentMessages = messages;
     renderMessages(messages);
   });
 }
 
 function renderMessages(messages) {
-  messageList.innerHTML = messages.length
-    ? messages.map((message) => {
+  const pendingMessages = state.activePartner
+    ? state.pendingMessages.get(state.activePartner.id) || []
+    : [];
+  const allMessages = [...messages, ...pendingMessages]
+    .sort((first, second) => {
+      const firstTime = first.createdAt?.toDate?.()?.getTime?.() || first.createdAt?.getTime?.() || 0;
+      const secondTime = second.createdAt?.toDate?.()?.getTime?.() || second.createdAt?.getTime?.() || 0;
+      return firstTime - secondTime;
+    });
+
+  messageList.innerHTML = allMessages.length
+    ? allMessages.map((message) => {
       const own = message.senderId === state.currentUser.id;
       const createdAt = message.createdAt?.toDate?.() || new Date();
       const expiresAt = message.expiresAt?.toDate?.() || new Date(Date.now() + DAY_MS);
       const author = own ? state.currentUser.displayName : state.activePartner?.displayName || "Pessoa";
+      const canEdit = own && !String(message.id).startsWith("pending-");
+      const editedNote = message.wasEdited ? "dei uma ajeitadinha, prometo que ficou melhor" : "";
+      const showActions = state.activeMessageActionId === message.id ? "show-actions" : "";
       return `
-        <article class="message-item ${own ? "own" : ""}">
+        <article class="message-item ${own ? "own" : ""} ${showActions}" data-message-id="${escapeHtml(message.id)}">
           <div class="message-meta">
             <span class="message-author">${escapeHtml(author)}</span>
             <span class="message-time">${formatHour(createdAt)} - some ${formatRelativeExpiry(expiresAt)}</span>
           </div>
+          ${canEdit ? `<button type="button" class="message-menu-button" aria-label="Editar mensagem" data-edit-message="${escapeHtml(message.id)}">...</button>` : ""}
           <div class="message-text">${escapeHtml(message.text)}</div>
+          ${editedNote ? `<div class="message-edited-note">${escapeHtml(editedNote)}</div>` : ""}
         </article>
       `;
     }).join("")
     : `<div class="empty-state"><div><p class="empty-title">Sem mensagens por enquanto</p><p class="empty-copy">Tudo o que for enviado aqui vira texto cifrado e desaparece em 24 horas.</p></div></div>`;
 
   messageList.scrollTop = messageList.scrollHeight;
+}
+
+function addPendingMessage(partnerId, text) {
+  const pendingMessage = {
+    id: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    senderId: state.currentUser.id,
+    recipientId: partnerId,
+    text,
+    wasEdited: false,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + DAY_MS)
+  };
+  const existingMessages = state.pendingMessages.get(partnerId) || [];
+  state.pendingMessages.set(partnerId, [...existingMessages, pendingMessage]);
+  return pendingMessage.id;
+}
+
+function removePendingMessage(partnerId, pendingId) {
+  const existingMessages = state.pendingMessages.get(partnerId) || [];
+  const nextMessages = existingMessages.filter((message) => message.id !== pendingId);
+
+  if (nextMessages.length) {
+    state.pendingMessages.set(partnerId, nextMessages);
+    return;
+  }
+
+  state.pendingMessages.delete(partnerId);
+}
+
+function findMessageById(messageId) {
+  return state.currentMessages.find((message) => message.id === messageId) || null;
+}
+
+function setActiveMessageAction(messageId = null) {
+  state.activeMessageActionId = messageId;
+  renderMessages(state.currentMessages);
+}
+
+function clearLongPressTimer() {
+  if (!state.longPressTimer) return;
+  clearTimeout(state.longPressTimer);
+  state.longPressTimer = null;
+}
+
+async function openEditMessagePrompt(messageId) {
+  const message = findMessageById(messageId);
+  if (!message || message.senderId !== state.currentUser.id || !state.activePartner) return;
+
+  const nextText = window.prompt("Editar mensagem", message.text);
+  state.activeMessageActionId = null;
+  if (nextText === null) return;
+
+  const trimmedText = nextText.trim();
+  if (!trimmedText || trimmedText === message.text) return;
+
+  try {
+    const conversationKey = await getConversationKey(state.activePartner.id);
+    if (!conversationKey) {
+      showMessage("Nao consegui abrir a chave desta conversa para editar.", true);
+      return;
+    }
+
+    const encryptedMessage = await encryptMessageText(trimmedText, conversationKey);
+    const updatePayload = {
+      ciphertext: encryptedMessage.ciphertext,
+      iv: encryptedMessage.iv,
+      wasEdited: true,
+      editedAt: serverTimestamp()
+    };
+
+    await Promise.all([
+      setDoc(messageRef(state.currentUser.id, state.activePartner.id, messageId), updatePayload, { merge: true }),
+      setDoc(messageRef(state.activePartner.id, state.currentUser.id, messageId), updatePayload, { merge: true })
+    ]);
+  } catch (error) {
+    showMessage("Nao consegui retocar essa mensagem agora.", true);
+  }
 }
 
 async function sendMessage(event) {
@@ -743,32 +1009,37 @@ async function sendMessage(event) {
     return;
   }
 
-  const input = document.getElementById("messageInput");
-  const text = input.value.trim();
-  if (!text || !state.activePartner) return;
+  const text = messageInput.value.trim();
+  const partner = state.activePartner;
+  if (!text || !partner) return;
+
+  messageInput.value = "";
+  const pendingId = addPendingMessage(partner.id, text);
+  renderMessages(state.currentMessages);
 
   try {
-    const conversationKey = await ensureConversationForPartner(state.activePartner);
+    const conversationKey = await ensureConversationForPartner(partner);
     const encryptedMessage = await encryptMessageText(text, conversationKey);
     const expiresAt = new Date(Date.now() + DAY_MS);
-    const conversationId = makeConversationId(state.currentUser.id, state.activePartner.id);
+    const conversationId = makeConversationId(state.currentUser.id, partner.id);
+    const messageId = makeMessageId();
     const batch = writeBatch(db);
-    const ownContact = contactRef(state.currentUser.id, state.activePartner.id);
-    const partnerContact = contactRef(state.activePartner.id, state.currentUser.id);
+    const ownContact = contactRef(state.currentUser.id, partner.id);
+    const partnerContact = contactRef(partner.id, state.currentUser.id);
 
     batch.set(ownContact, {
       ownerId: state.currentUser.id,
-      partnerId: state.activePartner.id,
-      participantIds: [state.currentUser.id, state.activePartner.id],
+      partnerId: partner.id,
+      participantIds: [state.currentUser.id, partner.id],
       conversationId,
       lastMessageLabel: "Mensagem criptografada",
       updatedAt: serverTimestamp()
     }, { merge: true });
 
     batch.set(partnerContact, {
-      ownerId: state.activePartner.id,
+      ownerId: partner.id,
       partnerId: state.currentUser.id,
-      participantIds: [state.currentUser.id, state.activePartner.id],
+      participantIds: [state.currentUser.id, partner.id],
       conversationId,
       lastMessageLabel: "Nova mensagem criptografada",
       updatedAt: serverTimestamp()
@@ -777,22 +1048,31 @@ async function sendMessage(event) {
     await batch.commit();
 
     const payload = {
+      id: messageId,
       senderId: state.currentUser.id,
-      recipientId: state.activePartner.id,
+      recipientId: partner.id,
       conversationId,
       ciphertext: encryptedMessage.ciphertext,
       iv: encryptedMessage.iv,
+      wasEdited: false,
       createdAt: serverTimestamp(),
       expiresAt
     };
 
     await Promise.all([
-      addDoc(messagesCollection(state.currentUser.id, state.activePartner.id), payload),
-      addDoc(messagesCollection(state.activePartner.id, state.currentUser.id), payload)
+      setDoc(messageRef(state.currentUser.id, partner.id, messageId), payload),
+      setDoc(messageRef(partner.id, state.currentUser.id, messageId), payload)
     ]);
-
-    input.value = "";
+    removePendingMessage(partner.id, pendingId);
+    if (state.activePartner?.id === partner.id) {
+      renderMessages(state.currentMessages);
+    }
   } catch (error) {
+    removePendingMessage(partner.id, pendingId);
+    if (state.activePartner?.id === partner.id) {
+      messageInput.value = text;
+      renderMessages(state.currentMessages);
+    }
     showMessage("Nao consegui enviar a mensagem criptografada.", true);
   }
 }
@@ -850,33 +1130,105 @@ function hidePrivacyOverlay() {
   privacyOverlay.classList.add("hidden");
 }
 
+function handlePrivacyRiskStart() {
+  showPrivacyOverlay(false);
+}
+
+function handlePrivacyRiskEnd() {
+  if (document.visibilityState === "visible" && document.hasFocus()) {
+    hidePrivacyOverlay();
+  }
+}
+
+function isPrintScreenEvent(event) {
+  const key = String(event.key || "").toLowerCase();
+  const code = String(event.code || "").toLowerCase();
+
+  return key === "printscreen"
+    || key === "printscr"
+    || key === "sysrq"
+    || code === "printscreen"
+    || code === "sysrq";
+}
+
+function isDesktopKeyboardSend(event) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+    return false;
+  }
+
+  return window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+}
+
+function lockViewportPosition() {
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+  window.scrollTo(0, 0);
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
-    showPrivacyOverlay(false);
+    handlePrivacyRiskStart();
   } else {
-    hidePrivacyOverlay();
+    handlePrivacyRiskEnd();
   }
 });
 
-window.addEventListener("beforeprint", () => showPrivacyOverlay(false));
-window.addEventListener("afterprint", hidePrivacyOverlay);
+window.addEventListener("beforeprint", handlePrivacyRiskStart);
+window.addEventListener("afterprint", handlePrivacyRiskEnd);
+window.addEventListener("blur", handlePrivacyRiskStart);
+window.addEventListener("focus", handlePrivacyRiskEnd);
+window.addEventListener("pagehide", handlePrivacyRiskStart);
+window.addEventListener("pageshow", lockViewportPosition);
+window.addEventListener("resize", lockViewportPosition);
+document.addEventListener("freeze", handlePrivacyRiskStart);
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "PrintScreen") {
-    showPrivacyOverlay();
+  if (isPrintScreenEvent(event)) {
+    handlePrivacyRiskStart();
   }
+
   if (event.key === "Escape") {
     hidePrivacyOverlay();
   }
-});
+}, true);
+
+document.addEventListener("keyup", (event) => {
+  if (isPrintScreenEvent(event)) {
+    handlePrivacyRiskStart();
+  }
+}, true);
 
 privacyOverlay.addEventListener("click", hidePrivacyOverlay);
 
 document.addEventListener("click", async (event) => {
+  const editButton = event.target.closest("[data-edit-message]");
+  if (editButton) {
+    await openEditMessagePrompt(editButton.dataset.editMessage);
+    return;
+  }
+
+  if (!event.target.closest(".message-item")) {
+    setActiveMessageAction(null);
+  }
+
   const openButton = event.target.closest("[data-open-user]");
   if (!openButton) return;
   await openConversationWithUser(openButton.dataset.openUser);
 });
+
+messageList.addEventListener("pointerdown", (event) => {
+  const messageElement = event.target.closest(".message-item.own[data-message-id]");
+  if (!messageElement || window.matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+
+  clearLongPressTimer();
+  state.longPressTimer = window.setTimeout(() => {
+    setActiveMessageAction(messageElement.dataset.messageId);
+  }, 520);
+});
+
+messageList.addEventListener("pointerup", clearLongPressTimer);
+messageList.addEventListener("pointercancel", clearLongPressTimer);
+messageList.addEventListener("pointerleave", clearLongPressTimer);
 
 registerForm.addEventListener("submit", registerUser);
 unlockForm.addEventListener("submit", unlockUser);
@@ -884,7 +1236,13 @@ document.getElementById("resetDeviceButton").addEventListener("click", () => {
   resetDevice().catch(() => showMessage("Nao consegui trocar o aparelho agora.", true));
 });
 document.getElementById("lockButton").addEventListener("click", lockApp);
-document.getElementById("messageForm").addEventListener("submit", sendMessage);
+messageForm.addEventListener("submit", sendMessage);
+messageInput.addEventListener("keydown", (event) => {
+  if (!isDesktopKeyboardSend(event)) return;
+
+  event.preventDefault();
+  messageForm.requestSubmit();
+});
 userSearch.addEventListener("input", (event) => searchUsers(event.target.value));
 window.addEventListener("popstate", (event) => {
   if (event.state?.screen === "chat" && event.state?.partnerId) {
@@ -912,6 +1270,10 @@ if (!isFirebaseConfigured()) {
   showMessage("Preencha o firebaseConfig em app.js para conectar o app ao Firebase.");
   registerForm.classList.remove("hidden");
 } else {
+  if ("scrollRestoration" in history) {
+    history.scrollRestoration = "manual";
+  }
+  lockViewportPosition();
   bootstrap().catch((error) => {
     console.error("Firebase bootstrap error:", error);
     showMessage(explainFirebaseError(error, "Nao consegui iniciar o Firebase agora."), true);
@@ -921,6 +1283,7 @@ if (!isFirebaseConfigured()) {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
+    lockViewportPosition();
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   });
 }
